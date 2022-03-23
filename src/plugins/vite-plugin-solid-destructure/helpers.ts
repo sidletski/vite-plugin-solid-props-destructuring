@@ -1,6 +1,9 @@
-const traverse = require('@babel/traverse').default;
-const generate = require('@babel/generator').default;
-const parse = require('@babel/parser').parse;
+import traverse from '@babel/traverse';
+import generate from '@babel/generator';
+import { parse } from '@babel/parser';
+import * as t from '@babel/types';
+
+const solidLibName = 'solid-js';
 
 const inputPropsVariableName = 'input';
 const propsVariableName = 'values';
@@ -16,7 +19,7 @@ export const isJSX = (path: any) => {
         return;
       }
 
-      if (path.type === 'JSXFragment' || path.type === 'JSXElement') {
+      if (t.isJSXFragment(path.node) || t.isJSXElement(path.node)) {
         foundJSXCode = true;
         path.skip();
       }
@@ -42,7 +45,7 @@ const getImportSpecifier = (name: string) => {
 };
 
 const modifyImports = (source: string, filename: string) => {
-  const ast = parse(source, {
+  const ast: any = parse(source, {
     sourceFilename: filename,
     plugins: ['typescript', 'jsx'],
     sourceType: 'module',
@@ -56,7 +59,7 @@ const modifyImports = (source: string, filename: string) => {
 
       const source = path?.node.source.value;
 
-      if (source === 'solid-js') {
+      if (source === solidLibName) {
         wasSolidJSImportFound = true;
 
         const bindings = Object.keys(path.parentPath.scope.bindings);
@@ -81,14 +84,15 @@ const modifyImports = (source: string, filename: string) => {
         specifiers: requiredImports.map(getImportSpecifier),
         source: {
           type: 'StringLiteral',
-          extra: { rawValue: 'solid-js', raw: "'solid-js'" },
-          value: 'solid-js',
+          extra: { rawValue: solidLibName, raw: `'${solidLibName}'` },
+          value: solidLibName,
         },
       },
-    ].concat(ast.program.body);
+      ...ast.program.body,
+    ];
   }
 
-  const output = generate(ast, source);
+  const output = generate(ast);
 
   return output.code;
 };
@@ -106,29 +110,20 @@ export const mapProps = (source: string, filename: string) => {
     FunctionDeclaration(path: any) {
       if (!isJSX(path)) return;
 
-      if (
-        path.node.params.length === 0 ||
-        path.node.params[0].type === 'Identifier'
-      ) {
+      wasPropsMapped = modifyFunction(path.node, ast);
+      path.skip();
+    },
+    ArrowFunctionExpression(path: any) {
+      if (!isJSX(path)) {
         return;
       }
 
       wasPropsMapped = modifyFunction(path.node, ast);
       path.skip();
     },
-    VariableDeclaration(path: any) {
-      const func = path.node.declarations[0].init;
-
-      if (func?.type !== 'ArrowFunctionExpression') return;
-
-      if (!isJSX(path)) return;
-
-      wasPropsMapped = modifyFunction(func, ast);
-      path.skip();
-    },
   });
 
-  const output = generate(ast, source);
+  const output = generate(ast);
 
   if (!wasPropsMapped) return output.code;
 
@@ -140,28 +135,27 @@ const modifyFunction = (func: any, parent: any) => {
   let restPropName = null;
 
   // No need to run transform function
-  if (func.params.length === 0 || func.params[0].type === 'Identifier') {
+  if (func.params.length === 0 || t.isIdentifier(func.params[0])) {
     return false;
   }
 
   const props: { name: string; value?: any; type?: string }[] =
     func.params[0].properties
       .map((prop: any) => {
-        const { value } = prop;
-        const type = value?.type;
+        if (t.isRestElement(prop)) {
+          const argument = prop.argument as t.Identifier;
+          restPropName = argument.name;
 
-        if (type === undefined) {
-          if (prop?.type === 'RestElement') {
-            restPropName = prop.argument.name;
-          }
           return null;
         }
 
-        if (type === 'Identifier') {
+        const { value } = prop;
+
+        if (t.isIdentifier(prop.value)) {
           return {
             name: value.name,
           };
-        } else if (type === 'AssignmentPattern') {
+        } else if (t.isAssignmentPattern(prop.value)) {
           return {
             name: value.left.name,
             value: value.right.value,
@@ -186,12 +180,13 @@ const modifyFunction = (func: any, parent: any) => {
     {
       enter(path: any) {
         const node = path.node;
-        if (node.type === 'MemberExpression') {
+
+        if (t.isMemberExpression(node)) {
           path.skip();
           return;
         }
 
-        if (node.type !== 'Identifier') return;
+        if (!t.isIdentifier(node)) return;
         if (!propsList.includes(node.name)) return;
 
         const nextNode = {
